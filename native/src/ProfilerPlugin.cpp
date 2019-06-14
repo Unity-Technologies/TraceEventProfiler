@@ -14,6 +14,10 @@
 #include <sstream>
 #include <mutex>
 
+#ifdef _MSC_VER
+#include "windows.h"
+#endif
+
 /*
 
 This plugin hooks into the native Unity profile to log events and export them into the Chrome Trace Format.
@@ -126,9 +130,11 @@ struct ThreadLocalState
 {
 	ThreadLocalState() :
         threadId(0),
-        curBlock(nullptr)
+        curBlock(nullptr),
+		stateInitilaized(false)
     {}
 
+	bool stateInitilaized;
 	EventNodeBlock *curBlock;
     uint64_t threadId;
 	std::string lastError;
@@ -174,11 +180,17 @@ static IUnityProfilerCallbacksV2* s_UnityProfilerCallbacksV2 = nullptr;
 
 inline void InitializeThreadLocal()
 {
-	if (gThreadState.threadId == 0)
+	if (!gThreadState.stateInitilaized)
     {
-        std::thread::id currentThreadId = std::this_thread::get_id();
-        gThreadState.threadId = *((size_t*)(&currentThreadId));
+		
+#ifdef _MSC_VER
+		gThreadState.threadId = GetCurrentThreadId();
+#else
+		std::thread::id currentThreadId = std::this_thread::get_id();
+		gThreadState.threadId = *((size_t*)(&currentThreadId));
+#endif
         std::atomic_fetch_add_explicit(&gThreadCount, 1, std::memory_order_relaxed);
+		gThreadState.stateInitilaized = true;
     }
 }
 
