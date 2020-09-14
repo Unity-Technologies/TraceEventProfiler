@@ -518,6 +518,109 @@ static bool WriteTraceFile(std::string &filename, EventNodeBlock *list, int capt
 	return true;
 }
 
+static bool WriteTraceFile2(std::string& filename, EventNodeBlock* list, int captureId)
+{
+	// Build up the JSON trace data in a string stream
+	std::ostringstream stream;
+
+	stream << "[" << std::endl;
+
+	bool first = true;
+	for (EventNodeBlock* block = list; block != NULL; block = block->next)
+	{
+		// This block is from a previous capture. ignore it
+		if (block->captureId != captureId)
+			continue;
+
+		int eventCount = block->pos;
+		for (int i = 0; i < eventCount; i++)
+		{
+			EventNode& node = block->data[i];
+
+			// If this doesn't match, the memory written by the thread hasn't been flushed yet.
+			// This should be very rare race condition, but handling this case anyway.. just skip the event
+			if (node.memValidationData != kMemValidationMagicData)
+				continue;
+
+			if (!first)
+			{
+				stream << "," << std::endl;
+			}
+			else
+				first = false;
+
+			stream << "{\"ph\":" << kEventTypePhaseNames[node.type] << ",";
+
+			long usTime = (long)std::chrono::duration_cast<std::chrono::microseconds>(node.time - gCaptureState.captureStartTime).count();
+			stream << "\"ts\":" << usTime << ",";
+
+			if (node.type != EventType_ThreadName)
+				stream << "\"tid\":" << block->threadState->threadId << ",";
+
+			stream << "\"pid\":1";
+
+			switch (node.type)
+			{
+			case EventType_Begin:
+			case EventType_End:
+			case EventType_Single:
+			{
+				if (node.markerDesc->name != NULL)
+					stream << ",\"name\":\"" << node.markerDesc->name << "\",";
+				else
+					stream << ",\"name\":\"Unknown Event Name\",";
+				stream << "\"cat\": \"" << gCaptureState.categories[node.markerDesc->categoryId] << "\"}";
+			} break;
+
+			case EventType_FlowBegin:
+			case EventType_FlowNext:
+			{
+				stream << ",\"name\":\"flow\",";
+				stream << "\"id\": " << node.flowData.flowId << ",";
+				stream << "\"cat\": \"flowevent\"}";
+			} break;
+
+			case EventType_AsyncBegin:
+			case EventType_AsyncEnd:
+			{
+				stream << ",\"id\": " << node.asyncData.asyncEventInstanceId << ",";
+				stream << "\"cat\": \"asyncevent\",";
+
+				std::lock_guard<std::mutex>(gCaptureState.nameListMutex);
+				stream << "\"name\":\"" << gCaptureState.nameList[node.asyncData.asyncEventNameId] << "\"}";
+			} break;
+
+			case EventType_ThreadName:
+			{
+				std::lock_guard<std::mutex>(gCaptureState.nameListMutex);
+				stream << ",\"args\": {\"name\": \"" << gCaptureState.nameList[node.threadNameData.threadNameId] << "\"},";
+				stream << "\"tid\": " << node.threadNameData.threadId << ",";
+				stream << "\"name\":\"thread_name\"}";
+			} break;
+			}
+		}
+	}
+
+	stream << "]" << std::endl;
+
+	// Write the JSON string to the file
+	std::ofstream file;
+	file.open(filename.c_str());
+
+	if (!file.is_open())
+	{
+		// TODO: make sure memory gets freed still
+		gThreadState.lastError = "Failed to open file '" + filename + "' for writing";
+		return false;
+	}
+
+	file << stream.str();	// ();
+
+	file.close();
+
+	return true;
+}
+
 extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API BeginCapture(const char *filename, int maxMemUsageMB)
 {
 	if (gCaptureState.isCaptureActive)
@@ -572,7 +675,7 @@ extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API EndCapture()
 	// reverse the order of the block list so we pull them out in order the were submitted
 	localList = ReverseListOrder(localList);
 
-	bool result = WriteTraceFile(gCaptureState.filename, localList, gCaptureState.activeCaptureId);
+	bool result = WriteTraceFile2(gCaptureState.filename, localList, gCaptureState.activeCaptureId);
 
 	// add the blocks we just processed to the deallocate list
 	gCaptureState.pendingDeallocList = CombineLists(localList, gCaptureState.pendingDeallocList);
