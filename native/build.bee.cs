@@ -3,16 +3,14 @@ using Bee.Core;
 using Bee.Toolchain.Android;
 using Bee.Toolchain.IOS;
 using Bee.Toolchain.Windows;
-using Unity.BuildSystem.CSharpSupport;
-using Unity.BuildSystem.MacSDKSupport;
-using Unity.BuildSystem.NativeProgramSupport;
-using Unity.BuildSystem.VisualStudio.MsvcVersions;
-using Unity.BuildTools;
 using NiceIO;
 using System;
 using System.Linq;
 using Bee.Toolchain.VisualStudio;
 using Bee.Toolchain.GNU;
+using Bee.NativeProgramSupport;
+using Bee.Tools;
+using Bee.Toolchain.MacOS;
 
 class BuildProgram
 {
@@ -36,14 +34,16 @@ class BuildProgram
         };
         plugin.CompilerSettingsForIosOrTvos().Add(s => s.WithEmbedBitcode(true));
         plugin.DynamicLinkerSettingsForWindows().Add(s => s.WithDefinitionFile("src/ProfilerPlugin.def"));
+
+        plugin.OutputName.Set(c => DllNameForPlatform(c.ToolChain.Platform));
+
         foreach (var command in commands)
         {
             var toolchain = command.ToolChain;
-            plugin.OutputName.Set(c => DllNameForPlatform(c.ToolChain.Platform));
 
             var config = new NativeProgramConfiguration(CodeGen.Release, toolchain, false);
-            var builtProgram = plugin.SetupSpecificConfiguration(config, toolchain.DynamicLibraryFormat, 
-                targetDirectory: $"artifacts_preprocess/{toolchain.LegacyPlatformIdentifier}");
+            var tempDir = $"artifacts_preprocess/{toolchain.LegacyPlatformIdentifier}";
+            var builtProgram = plugin.SetupSpecificConfiguration(config, toolchain.DynamicLibraryFormat).DeployTo(tempDir).Path;
             if (command.PostProcess != null)
                 builtProgram = command.PostProcess(builtProgram, toolchain, command.PluginSubFolder);
             Backend.Current.AddAliasDependency(command.Alias, builtProgram);
@@ -65,9 +65,9 @@ class BuildProgram
     private static List<BuildCommand> GetAndroidBuildCommands()
     {
         List<BuildCommand> cmds = new List<BuildCommand>();
-        cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.LocatorArmv7.UserDefaultOrDummy), "android", "Android/armeabi-v7a"));
-        cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.LocatorArm64.UserDefaultOrDummy), "android", "Android/armeabi"));
-        cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.Locatorx86.UserDefaultOrDummy), "android", "Android/x86"));
+        cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.LocatorArmv7.UserDefault), "android", "Android/armeabi-v7a"));
+        cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.LocatorArm64.UserDefault), "android", "Android/armeabi"));
+        cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.Locatorx86.UserDefault), "android", "Android/x86"));
         return cmds;
     }
 
@@ -83,13 +83,13 @@ class BuildProgram
         {
             new BuildCommand()
             {
-                ToolChain = new MacToolchain(MacSdk.Locator.UserDefaultOrDummy, new x64Architecture()),
+                ToolChain = new MacToolchain(MacSdk.Locatorx64.UserDefaultOrDummy),
                 PostProcess = (p, t, s) => ChangeExtension(".bundle", p, t, string.Empty),
                 Alias = "osx"
             },
             new BuildCommand()
             {
-                ToolChain = new IOSToolchain(IOSSdk.Locator.UserDefaultOrDummy, new Arm64Architecture()),
+                ToolChain = new IOSToolchain(IOSSdk.LocatorArm64.UserDefaultOrDummy),
                 PostProcess = (p, t, s) => ChangeExtension(".bundle", p, t, string.Empty),
                 Alias = "ios"
             },

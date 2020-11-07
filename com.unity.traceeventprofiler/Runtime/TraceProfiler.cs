@@ -52,6 +52,8 @@ namespace TraceEventProfiler
         {
             if (TraceDLLAPI.EndCapture() == 0)
                 LogLastError("TraceProfiler::EndCapture");
+
+            Debug.Log("Capture Ended");
         }
 
         /// <summary>
