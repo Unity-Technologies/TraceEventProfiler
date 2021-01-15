@@ -536,6 +536,17 @@ static bool WriteTraceFile(std::string &filename, EventNodeBlock *list, int capt
 
 static bool WriteTraceFile2(std::string& filename, EventNodeBlock* list, int captureId)
 {
+	// Write the JSON string to the file
+	std::ofstream file;
+	file.open(filename.c_str());
+
+	if (!file.is_open())
+	{
+		// TODO: make sure memory gets freed still
+		gThreadState.lastError = "Failed to open file '" + filename + "' for writing";
+		return false;
+	}
+
 	// Build up the JSON trace data in a string stream
 	std::ostringstream stream;
 
@@ -621,23 +632,17 @@ static bool WriteTraceFile2(std::string& filename, EventNodeBlock* list, int cap
 				stream << "\"name\":\"thread_name\"}";
 			} break;
 			}
+
+			file << stream.str();
+
+			stream.str("");
+			stream.clear();
 		}
 	}
 
 	stream << "]" << std::endl;
 
-	// Write the JSON string to the file
-	std::ofstream file;
-	file.open(filename.c_str());
-
-	if (!file.is_open())
-	{
-		// TODO: make sure memory gets freed still
-		gThreadState.lastError = "Failed to open file '" + filename + "' for writing";
-		return false;
-	}
-
-	file << stream.str();	// ();
+	file << stream.str();
 
 	file.close();
 
@@ -652,7 +657,7 @@ extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API BeginCapture(const cha
 		return 0;
 	}
 
-	gCaptureState.maxMemoryUsageBytes = maxMemUsageMB * 1024 * 1024; // MB to B
+	gCaptureState.maxMemoryUsageBytes = static_cast<uint64_t>(maxMemUsageMB) * 1024 * 1024; // MB to B
 	gCaptureState.captureStartTime = EventClock::now();
 	gCaptureState.filename = filename;
 	gCaptureState.inFrame = false;
