@@ -13,6 +13,7 @@
 #include <vector>
 #include <sstream>
 #include <mutex>
+#include <iomanip>
 
 #ifdef _MSC_VER
 #include "windows.h"
@@ -87,9 +88,12 @@ struct ThreadNameData
     uint32_t threadNameId;
 };
 
+//typedef std::chrono::steady_clock EventClock;
+typedef std::chrono::system_clock EventClock;
+
 struct EventNode
 {
-	std::chrono::time_point<std::chrono::steady_clock> time;
+	std::chrono::time_point<EventClock> time;
 	union
 	{
         // EventType_Flow*
@@ -157,7 +161,7 @@ struct CaptureState
 	std::atomic<int> nextAsyncCaptureId;
 	int frameAsyncEventId;
 	std::atomic<bool> isCaptureActive;
-	std::chrono::time_point<std::chrono::steady_clock> captureStartTime;
+	std::chrono::time_point<EventClock> captureStartTime;
 	std::vector<std::string> categories;
 	bool inFrame;
 
@@ -177,6 +181,7 @@ CaptureState gCaptureState;
 thread_local ThreadLocalState gThreadState;
 static IUnityProfilerCallbacks* s_UnityProfilerCallbacks = nullptr;
 static IUnityProfilerCallbacksV2* s_UnityProfilerCallbacksV2 = nullptr;
+static std::chrono::time_point<EventClock> s_EventClockEpoch;
 
 inline void InitializeThreadLocal()
 {
@@ -192,6 +197,14 @@ inline void InitializeThreadLocal()
         std::atomic_fetch_add_explicit(&gThreadCount, 1, std::memory_order_relaxed);
 		gThreadState.stateInitilaized = true;
     }
+}
+
+std::chrono::time_point<EventClock> GetEpoch()
+{
+	std::tm tm = {};
+	std::stringstream ss("Jan 1 0001 00:00:00");
+	ss >> std::get_time(&tm, "%b %d %Y %H:%M:%S");
+	return EventClock::from_time_t(std::mktime(&tm));
 }
 
 static bool AddEventNodeToBlock(EventNodeBlock &block, EventNode &e)
@@ -213,7 +226,7 @@ static bool AllocateEventBlock(CaptureState &captureState, ThreadLocalState &thr
 	if (threadState.curBlock != NULL)
 		threadState.curBlock->isFinalized.store(true);
 
-	if (captureState.curMemUsageBytes.load(std::memory_order_relaxed) + sizeof(EventNodeBlock) < captureState.maxMemoryUsageBytes)
+//	if (captureState.curMemUsageBytes.load(std::memory_order_relaxed) + sizeof(EventNodeBlock) < captureState.maxMemoryUsageBytes)
 	{
 		captureState.curMemUsageBytes.fetch_add(sizeof(EventNodeBlock), std::memory_order_relaxed);
 		EventNodeBlock *block = new EventNodeBlock();
@@ -225,10 +238,10 @@ static bool AllocateEventBlock(CaptureState &captureState, ThreadLocalState &thr
 		block->next = captureState.activeBlockList.load(std::memory_order_relaxed);
 		while (!captureState.activeBlockList.compare_exchange_weak(block->next, block, std::memory_order_release, std::memory_order_relaxed));
 	}
-	else
+/*	else
 	{
 		threadState.curBlock = NULL;
-	}
+	} */
 	return threadState.curBlock != NULL;
 }
 
@@ -258,7 +271,7 @@ uint32_t RegisterStringInternal(const std::string& s)
 void AddAsyncEventInternal(bool isBeginEvent, int asyncEventNameId, int asyncEventInstanceId)
 {
 	EventNode node;
-	node.time = std::chrono::steady_clock::now();
+	node.time = EventClock::now();
 	node.type = isBeginEvent ? EventType_AsyncBegin : EventType_AsyncEnd;
 	node.asyncData.asyncEventNameId = asyncEventNameId;
 	node.asyncData.asyncEventInstanceId = asyncEventInstanceId;
@@ -269,12 +282,15 @@ static void UNITY_INTERFACE_API EventCallback(const UnityProfilerMarkerDesc* eve
 {
     if (gCaptureState.isCaptureActive.load(std::memory_order_relaxed))
     {
-        InitializeThreadLocal();
-        EventNode node;
-        node.time = std::chrono::steady_clock::now();
-        node.markerDesc = eventDesc;
-        node.type = eventType;
-        AddEventNode(node, gThreadState, (int)(intptr_t)userData);
+		if ((eventDesc->name != nullptr) && (_strcmpi(eventDesc->name, "GC.Alloc") != 0) && (_strcmpi(eventDesc->name, "Idle") != 0))
+		{
+			InitializeThreadLocal();
+			EventNode node;
+			node.time = EventClock::now();
+			node.markerDesc = eventDesc;
+			node.type = eventType;
+			AddEventNode(node, gThreadState, (int)(intptr_t)userData);
+		}
     }
 }
 
@@ -284,7 +300,7 @@ static void UNITY_INTERFACE_API FlowEventCallback(UnityProfilerFlowEventType flo
     {
         InitializeThreadLocal();
         EventNode node;
-        node.time = std::chrono::steady_clock::now();
+        node.time = EventClock::now();
         node.flowData.flowId = flowId;
         node.type = flowEventType == kUnityProfilerFlowEventTypeBegin ? EventType_FlowBegin : EventType_FlowNext;
         AddEventNode(node, gThreadState, (int)(intptr_t)userData);
@@ -333,7 +349,7 @@ static void UNITY_INTERFACE_API CreateThreadCallback(const UnityProfilerThreadDe
     threadName += threadDesc->name;
 
     EventNode node;
-    node.time = std::chrono::steady_clock::now();
+    node.time = EventClock::now();
     node.threadNameData.threadId = threadDesc->threadId;
     node.threadNameData.threadNameId = RegisterStringInternal(threadName);
     node.type = EventType_ThreadName;
@@ -551,7 +567,14 @@ static bool WriteTraceFile2(std::string& filename, EventNodeBlock* list, int cap
 
 			stream << "{\"ph\":" << kEventTypePhaseNames[node.type] << ",";
 
-			long usTime = (long)std::chrono::duration_cast<std::chrono::microseconds>(node.time - gCaptureState.captureStartTime).count();
+			// Time relative to start of capture
+//			long usTime = (long)std::chrono::duration_cast<std::chrono::microseconds>(node.time - gCaptureState.captureStartTime).count();
+//			long usTime = (long)std::chrono::duration_cast<std::chrono::microseconds>(node.time - s_EventClockEpoch).count();
+
+			// Time relative to clock's epoch
+			auto nowUs = std::chrono::time_point_cast<std::chrono::microseconds>(node.time);
+			const uint64_t usTime = nowUs.time_since_epoch().count();
+
 			stream << "\"ts\":" << usTime << ",";
 
 			if (node.type != EventType_ThreadName)
@@ -630,7 +653,7 @@ extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API BeginCapture(const cha
 	}
 
 	gCaptureState.maxMemoryUsageBytes = maxMemUsageMB * 1024 * 1024; // MB to B
-	gCaptureState.captureStartTime = std::chrono::steady_clock::now();
+	gCaptureState.captureStartTime = EventClock::now();
 	gCaptureState.filename = filename;
 	gCaptureState.inFrame = false;
 	gCaptureState.activeCaptureId++;
@@ -658,7 +681,7 @@ extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API EndCapture()
 
     // Give time for threads to complete active events and also time for thread written memory to be flushed so we can read it
     // See comments at the top of this file for more details
-	std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+	// std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
 	s_UnityProfilerCallbacks->UnregisterCreateMarkerCallback(&CreateMarkerCallback, (void*)(intptr_t)gCaptureState.activeCaptureId);
     s_UnityProfilerCallbacks->UnregisterMarkerEventCallback(NULL, &EventCallback, (void*)(intptr_t)gCaptureState.activeCaptureId);
@@ -692,6 +715,8 @@ extern "C" void	UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginLoad(IUnit
 {
 	s_UnityProfilerCallbacks = unityInterfaces->Get<IUnityProfilerCallbacks>();
     s_UnityProfilerCallbacksV2 = unityInterfaces->Get<IUnityProfilerCallbacksV2>();
+
+	s_EventClockEpoch = GetEpoch();
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginUnload()
