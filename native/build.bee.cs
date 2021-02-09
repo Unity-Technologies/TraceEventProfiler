@@ -65,6 +65,11 @@ class BuildProgram
     private static List<BuildCommand> GetAndroidBuildCommands()
     {
         List<BuildCommand> cmds = new List<BuildCommand>();
+        if (AndroidNdk.LocatorArmv7.UserDefault == null)
+        {
+            Console.WriteLine("No Android SDK found");
+            return cmds;
+        }
         cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.LocatorArmv7.UserDefault), "android", "Android/armeabi-v7a"));
         cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.LocatorArm64.UserDefault), "android", "Android/armeabi"));
         cmds.Add(BuildCommand.Create(new AndroidNdkToolchain(AndroidNdk.Locatorx86.UserDefault), "android", "Android/x86"));
