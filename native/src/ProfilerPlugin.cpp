@@ -445,10 +445,10 @@ static bool WriteTraceFile(std::string &filename, EventNodeBlock *list, int capt
 			eventValues.clear();
 
             eventValues["ph"] = kEventTypePhaseNames[node.type];
-            long usTime = (long)std::chrono::duration_cast<std::chrono::microseconds>(node.time - gCaptureState.captureStartTime).count();
-            eventValues["ts"] = ToString(usTime);
-            eventValues["tid"] = UInt64ToString(block->threadState->threadId);
-            eventValues["pid"] = "1";
+			uint64_t usTime = std::chrono::duration_cast<std::chrono::microseconds>(node.time - gCaptureState.captureStartTime).count();
+			eventValues["ts"] = UInt64ToString(usTime);
+			eventValues["tid"] = UInt64ToString(block->threadState->threadId);
+			eventValues["pid"] = "1";
 
             switch (node.type)
             {
