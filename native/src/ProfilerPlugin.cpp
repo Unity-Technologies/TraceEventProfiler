@@ -425,6 +425,8 @@ static bool WriteTraceFile(std::string &filename, EventNodeBlock *list, int capt
     std::string argStr;
 	bool first = true;
 	
+	MemoryBarrier();
+
 	for(EventNodeBlock *block = list; block != NULL; block = block->next)
 	{
 		// This block is from a previous capture. ignore it
