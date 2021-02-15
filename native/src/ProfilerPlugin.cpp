@@ -526,7 +526,7 @@ extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API BeginCapture(const cha
 		return 0;
 	}
 
-	gCaptureState.maxMemoryUsageBytes = maxMemUsageMB * 1024 * 1024; // MB to B
+	gCaptureState.maxMemoryUsageBytes = static_cast<uint64_t>(maxMemUsageMB) * 1024 * 1024; // MB to B
 	gCaptureState.captureStartTime = std::chrono::steady_clock::now();
 	gCaptureState.filename = filename;
 	gCaptureState.inFrame = false;
