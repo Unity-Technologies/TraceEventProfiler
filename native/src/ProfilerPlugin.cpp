@@ -365,7 +365,10 @@ static EventNodeBlock *DeallocFinalized(EventNodeBlock *list)
 		EventNodeBlock *nextIter = iter->next;
 
 		if (iter->isFinalized)
+		{
 			delete iter;
+			gCaptureState.curMemUsageBytes.fetch_sub(sizeof(EventNodeBlock), std::memory_order_relaxed);
+		}
 		else
 		{
 			iter->next = ret;
