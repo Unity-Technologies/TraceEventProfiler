@@ -13,6 +13,7 @@
 #include <vector>
 #include <sstream>
 #include <mutex>
+#include <codecvt>
 
 #ifdef _MSC_VER
 #include "windows.h"
@@ -89,6 +90,9 @@ struct ThreadNameData
 
 struct EventNode
 {
+	static const uint32_t kNotDefaultMarker = -1;	// Value for defaultMarkerNameId when this is not a default marker (i.e. a "Profiler.Defautl" dynamic name marker)
+	static const uint32_t kEndDefaultMarker = -2;	// Value for defaultMarkerNameId when this is the end event for a default marker
+
 	std::chrono::time_point<std::chrono::steady_clock> time;
 	union
 	{
@@ -102,12 +106,23 @@ struct EventNode
         const UnityProfilerMarkerDesc *markerDesc; 
 	};
     
+	// If this is a begin event for a default marker (i.e. is a "Profiler.Default" marker that passes the actual dynamic name of the marker in it's metadata) then the category and name Id are stored here
+	// If this is a corresponding end event for a default marker "defaultMarkerNameId" will have the value kEndDefaultMarker (-2)
+	// If this is not a default marker then "defaultMarkerNameId" will have the value kNotDefaultMarker (-1) to indicate that
+	UnityProfilerCategoryId defaultMarkerCategoryId;
+	uint32_t defaultMarkerNameId;
+
     // Either EventType or kUnityProfilerMarkerEventType*
 	uint16_t type; 
 
     // Main thread can check this value to validate the node. Proper memory fencing cannot
     // be used because of the overhead of atomics
 	uint16_t memValidationData;
+
+	EventNode()
+		: defaultMarkerNameId(kNotDefaultMarker)
+	{
+	}
 };
 
 struct ThreadLocalState;
@@ -177,6 +192,7 @@ CaptureState gCaptureState;
 thread_local ThreadLocalState gThreadState;
 static IUnityProfilerCallbacks* s_UnityProfilerCallbacks = nullptr;
 static IUnityProfilerCallbacksV2* s_UnityProfilerCallbacksV2 = nullptr;
+static const UnityProfilerMarkerDesc* s_DefaultMarkerDesc;	// Marker description for the special "Profiler.Default" marker that is used to pass dynamically named markers
 
 inline void InitializeThreadLocal()
 {
@@ -274,8 +290,25 @@ static void UNITY_INTERFACE_API EventCallback(const UnityProfilerMarkerDesc* eve
         node.time = std::chrono::steady_clock::now();
         node.markerDesc = eventDesc;
         node.type = eventType;
+
+			if ((eventType == kUnityProfilerMarkerEventTypeBegin) && (eventDataCount > 2) && (eventDesc != nullptr) && (eventDesc == s_DefaultMarkerDesc))
+			{
+				// Default marker emits UTF16 string as the second metadata parameter so we convert it for our use
+
+				std::u16string u16_str(reinterpret_cast<const char16_t*>(eventData[1].ptr));
+				std::string name = std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{}.to_bytes(u16_str);
+				node.defaultMarkerNameId = RegisterStringInternal(name);
+				node.defaultMarkerCategoryId = static_cast<UnityProfilerCategoryId>(*(static_cast<const uint32_t*>(eventData[2].ptr)));
+			}
+			else if ((eventType == kUnityProfilerMarkerEventTypeEnd) && (eventDesc == s_DefaultMarkerDesc))
+			{
+				node.defaultMarkerNameId = EventNode::kEndDefaultMarker;
+			}
+			else
+				node.defaultMarkerNameId = EventNode::kNotDefaultMarker;
+
         AddEventNode(node, gThreadState, (int)(intptr_t)userData);
-    }
+	}
 }
 
 static void UNITY_INTERFACE_API FlowEventCallback(UnityProfilerFlowEventType flowEventType, uint32_t flowId, void* userData)
@@ -293,6 +326,12 @@ static void UNITY_INTERFACE_API FlowEventCallback(UnityProfilerFlowEventType flo
 
 static void UNITY_INTERFACE_API CreateMarkerCallback(const UnityProfilerMarkerDesc* eventDesc, void* userData)
 {
+	if (s_DefaultMarkerDesc == NULL)
+	{
+		if (strcmp(eventDesc->name, "Profiler.Default") == 0)
+			s_DefaultMarkerDesc = eventDesc;
+	}
+
 	if (gCaptureState.isCaptureActive.load(std::memory_order_relaxed))
 		s_UnityProfilerCallbacks->RegisterMarkerEventCallback(eventDesc, EventCallback, userData);
 }
@@ -365,7 +404,10 @@ static EventNodeBlock *DeallocFinalized(EventNodeBlock *list)
 		EventNodeBlock *nextIter = iter->next;
 
 		if (iter->isFinalized)
+		{
 			delete iter;
+			gCaptureState.curMemUsageBytes.fetch_sub(sizeof(EventNodeBlock), std::memory_order_relaxed);
+		}
 		else
 		{
 			iter->next = ret;
@@ -422,6 +464,8 @@ static bool WriteTraceFile(std::string &filename, EventNodeBlock *list, int capt
     std::string argStr;
 	bool first = true;
 	
+	MemoryBarrier();
+
 	for(EventNodeBlock *block = list; block != NULL; block = block->next)
 	{
 		// This block is from a previous capture. ignore it
@@ -440,12 +484,13 @@ static bool WriteTraceFile(std::string &filename, EventNodeBlock *list, int capt
 				continue;
 
 			eventValues.clear();
+			eventName = "";
 
             eventValues["ph"] = kEventTypePhaseNames[node.type];
-            long usTime = (long)std::chrono::duration_cast<std::chrono::microseconds>(node.time - gCaptureState.captureStartTime).count();
-            eventValues["ts"] = ToString(usTime);
-            eventValues["tid"] = UInt64ToString(block->threadState->threadId);
-            eventValues["pid"] = "1";
+			uint64_t usTime = std::chrono::duration_cast<std::chrono::microseconds>(node.time - gCaptureState.captureStartTime).count();
+			eventValues["ts"] = UInt64ToString(usTime);
+			eventValues["tid"] = UInt64ToString(block->threadState->threadId);
+			eventValues["pid"] = "1";
 
             switch (node.type)
             {
@@ -453,8 +498,17 @@ static bool WriteTraceFile(std::string &filename, EventNodeBlock *list, int capt
             case EventType_End:
             case EventType_Single:
             {
-                eventName = node.markerDesc->name != NULL ? std::string(node.markerDesc->name) : "Unknown Event Name";
-                eventValues["cat"] = std::string("\"") + gCaptureState.categories[node.markerDesc->categoryId] + "\"";
+				if (node.defaultMarkerNameId == EventNode::kNotDefaultMarker)
+				{
+					eventName = node.markerDesc->name != NULL ? std::string(node.markerDesc->name) : "Unknown Event Name";
+					eventValues["cat"] = std::string("\"") + gCaptureState.categories[node.markerDesc->categoryId] + "\"";
+				}
+				else if (node.defaultMarkerNameId != EventNode::kEndDefaultMarker)
+				{
+					std::lock_guard<std::mutex>(gCaptureState.nameListMutex);
+					eventName = gCaptureState.nameList[node.defaultMarkerNameId];
+					eventValues["cat"] = std::string("\"") + gCaptureState.categories[node.defaultMarkerCategoryId] + "\"";
+				}
             } break;
 
             case EventType_FlowBegin:
@@ -526,7 +580,7 @@ extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API BeginCapture(const cha
 		return 0;
 	}
 
-	gCaptureState.maxMemoryUsageBytes = maxMemUsageMB * 1024 * 1024; // MB to B
+	gCaptureState.maxMemoryUsageBytes = static_cast<uint64_t>(maxMemUsageMB) * 1024 * 1024; // MB to B
 	gCaptureState.captureStartTime = std::chrono::steady_clock::now();
 	gCaptureState.filename = filename;
 	gCaptureState.inFrame = false;
